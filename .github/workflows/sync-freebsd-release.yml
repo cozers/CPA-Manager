@@ -167,14 +167,15 @@ jobs:
           set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
           body="FreeBSD amd64 package for SERV00 deployment. Synced automatically from upstream seakee/CPA-Manager ${tag}."
-          if ! gh release view "${tag}" >/dev/null 2>&1; then
-            gh release create "${tag}" --title "${tag} FreeBSD" --notes "${body}" --target "${{ steps.release.outputs.commit }}"
+          repo="cozers/CPA-Manager"
+          if ! gh release view "${tag}" --repo "${repo}" >/dev/null 2>&1; then
+            gh release create "${tag}" --repo "${repo}" --title "${tag} FreeBSD" --notes "${body}" --target "${{ steps.release.outputs.commit }}"
           else
-            gh release edit "${tag}" --title "${tag} FreeBSD" --notes "${body}" --target "${{ steps.release.outputs.commit }}"
+            gh release edit "${tag}" --repo "${repo}" --title "${tag} FreeBSD" --notes "${body}" --target "${{ steps.release.outputs.commit }}"
           fi
-          existing="$(gh release view "${tag}" --json assets --jq '.assets[].name' || true)"
+          existing="$(gh release view "${tag}" --repo "${repo}" --json assets --jq '.assets[].name' || true)"
           while IFS= read -r name; do
             [ -z "${name}" ] && continue
-            gh release delete-asset "${tag}" "${name}" -y
+            gh release delete-asset "${tag}" "${name}" --repo "${repo}" -y
           done <<< "${existing}"
-          gh release upload "${tag}" "${asset}" "${asset}.sha256" --clobber
+          gh release upload "${tag}" "${asset}" "${asset}.sha256" --repo "${repo}" --clobber
