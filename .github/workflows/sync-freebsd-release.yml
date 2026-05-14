@@ -1,0 +1,186 @@
+name: Sync Upstream FreeBSD Release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-freebsd-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/seakee/CPA-Manager.git || git remote set-url upstream https://github.com/seakee/CPA-Manager.git
+          git fetch upstream main --tags --prune
+
+      - name: Resolve latest upstream release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          latest_tag="$(gh api repos/seakee/CPA-Manager/releases/latest --jq .tag_name)"
+          if [ -z "${latest_tag}" ] || [ "${latest_tag}" = "null" ]; then
+            latest_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          fi
+          commit="$(git rev-list -n 1 "${latest_tag}")"
+          echo "tag=${latest_tag}" >> "$GITHUB_OUTPUT"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: ${latest_tag} ${commit}"
+
+      - name: Sync main and latest tag to fork
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp .github/workflows/sync-freebsd-release.yml /tmp/sync-freebsd-release.yml
+          git checkout main
+          git reset --hard upstream/main
+          mkdir -p .github/workflows
+          cp /tmp/sync-freebsd-release.yml .github/workflows/sync-freebsd-release.yml
+          rm -f .github/workflows/release.yml
+          git add .github/workflows/sync-freebsd-release.yml
+          git rm -f .github/workflows/release.yml || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync upstream and keep FreeBSD release automation"
+          fi
+          git push origin main
+          git push origin "refs/tags/${{ steps.release.outputs.tag }}:refs/tags/${{ steps.release.outputs.tag }}"
+
+      - name: Checkout latest release tag
+        run: git checkout --detach "${{ steps.release.outputs.tag }}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: usage-service/go.sum
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build management UI
+        run: npm run build
+        env:
+          VERSION: ${{ steps.release.outputs.tag }}
+
+      - name: Embed UI and build FreeBSD binary
+        run: |
+          set -euo pipefail
+          mkdir -p usage-service/internal/httpapi/web
+          cp dist/index.html usage-service/internal/httpapi/web/management.html
+          cd usage-service
+          CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../cpa-manager ./cmd/cpa-manager
+
+      - name: Package FreeBSD asset
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release.outputs.tag }}"
+          package_dir="package/cpa-manager"
+          mkdir -p "${package_dir}/bin" "${package_dir}/data" "${package_dir}/logs"
+          cp cpa-manager "${package_dir}/bin/cpa-manager"
+          cat > "${package_dir}/config.json" <<'JSON'
+          {
+            "httpAddr": "0.0.0.0:18317",
+            "dataDir": "./data",
+            "collectorMode": "auto",
+            "queue": "usage",
+            "popSide": "right",
+            "batchSize": 100,
+            "pollIntervalMs": 500,
+            "queryLimit": 50000,
+            "corsOrigins": ["*"]
+          }
+          JSON
+          cat > "${package_dir}/start.sh" <<'SH'
+          #!/bin/sh
+          set -eu
+          APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          export CPA_MANAGER_CONFIG="${CPA_MANAGER_CONFIG:-$APP_DIR/config.json}"
+          export HTTP_ADDR="${HTTP_ADDR:-0.0.0.0:18317}"
+          mkdir -p "$APP_DIR/data" "$APP_DIR/logs"
+          exec "$APP_DIR/bin/cpa-manager" >> "$APP_DIR/logs/cpa-manager.log" 2>&1
+          SH
+          cat > "${package_dir}/daemon-start.sh" <<'SH'
+          #!/bin/sh
+          set -eu
+          APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          PIDFILE="$APP_DIR/cpa-manager.pid"
+          if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "cpa-manager already running: $(cat "$PIDFILE")"
+            exit 0
+          fi
+          nohup "$APP_DIR/start.sh" >/dev/null 2>&1 &
+          echo $! > "$PIDFILE"
+          echo "cpa-manager started: $(cat "$PIDFILE")"
+          SH
+          cat > "${package_dir}/stop.sh" <<'SH'
+          #!/bin/sh
+          set -eu
+          APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          PIDFILE="$APP_DIR/cpa-manager.pid"
+          if [ ! -f "$PIDFILE" ]; then
+            echo "pid file not found"
+            exit 0
+          fi
+          PID=$(cat "$PIDFILE")
+          if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID"
+            echo "cpa-manager stopped: $PID"
+          fi
+          rm -f "$PIDFILE"
+          SH
+          cat > "${package_dir}/VERSION" <<EOF
+          version=${tag}
+          commit=${{ steps.release.outputs.commit }}
+          source_upstream=https://github.com/seakee/CPA-Manager
+          source_fork=https://github.com/cozers/CPA-Manager
+          target_os=freebsd
+          target_arch=amd64
+          EOF
+          chmod +x "${package_dir}/bin/cpa-manager" "${package_dir}/start.sh" "${package_dir}/daemon-start.sh" "${package_dir}/stop.sh"
+          asset="cpa-manager-${tag}-freebsd-amd64.tar.gz"
+          tar -czf "${asset}" -C package cpa-manager
+          sha256sum "${asset}" > "${asset}.sha256"
+          echo "asset=${asset}" >> "$GITHUB_ENV"
+
+      - name: Publish FreeBSD-only release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release.outputs.tag }}"
+          body="FreeBSD amd64 package for SERV00 deployment. Synced automatically from upstream seakee/CPA-Manager ${tag}."
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag} FreeBSD" --notes "${body}" --target "${{ steps.release.outputs.commit }}"
+          else
+            gh release edit "${tag}" --title "${tag} FreeBSD" --notes "${body}" --target "${{ steps.release.outputs.commit }}"
+          fi
+          existing="$(gh release view "${tag}" --json assets --jq '.assets[].name' || true)"
+          while IFS= read -r name; do
+            [ -z "${name}" ] && continue
+            gh release delete-asset "${tag}" "${name}" -y
+          done <<< "${existing}"
+          gh release upload "${tag}" "${asset}" "${asset}.sha256" --clobber
