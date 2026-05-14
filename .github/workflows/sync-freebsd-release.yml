@@ -49,16 +49,10 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          cp .github/workflows/sync-freebsd-release.yml /tmp/sync-freebsd-release.yml
           git checkout main
-          git reset --hard upstream/main
-          mkdir -p .github/workflows
-          cp /tmp/sync-freebsd-release.yml .github/workflows/sync-freebsd-release.yml
-          rm -f .github/workflows/release.yml
-          git add .github/workflows/sync-freebsd-release.yml
-          git rm -f .github/workflows/release.yml || true
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: sync upstream and keep FreeBSD release automation"
+          git fetch origin main
+          if ! git merge-base --is-ancestor upstream/main HEAD; then
+            git merge --no-edit upstream/main
           fi
           git push origin main
           git push origin "refs/tags/${{ steps.release.outputs.tag }}:refs/tags/${{ steps.release.outputs.tag }}"
