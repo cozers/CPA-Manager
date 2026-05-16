@@ -125,6 +125,10 @@ GitHub Releases also provide native packages with the panel embedded:
 - `cpa-manager_<version>_windows_amd64.zip`
 - `cpa-manager_<version>_windows_arm64.zip`
 
+If you plan to deploy on a FreeBSD host such as `serv00`, see:
+
+- [SERV00 FreeBSD Deployment Guide](SERV00-FreeBSD-%E9%83%A8%E7%BD%B2%E6%8C%87%E5%8D%97.md)
+
 macOS/Linux:
 
 ```bash

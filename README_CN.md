@@ -125,6 +125,10 @@ GitHub Releases 同时提供内置面板的原生运行包：
 - `cpa-manager_<version>_windows_amd64.zip`
 - `cpa-manager_<version>_windows_arm64.zip`
 
+如果你要部署到 `serv00` 这类 FreeBSD 主机，请优先参考：
+
+- [SERV00 FreeBSD 部署指南](SERV00-FreeBSD-部署指南.md)
+
 macOS/Linux：
 
 ```bash
